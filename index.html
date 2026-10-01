@@ -51,6 +51,12 @@
   #hint b { color:var(--ink); }
   .maplibregl-popup-content { padding:6px 9px; font-size:12px; line-height:1.5; }
   .maplibregl-popup-content .pid { font-family:ui-monospace, Consolas, monospace; font-weight:700; }
+  #layers { position:absolute; z-index:3; top:8px; right:48px; background:rgba(255,255,255,.94);
+            border:1px solid var(--line); border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+  #layers button { border:none; background:none; padding:6px 12px; font:inherit; font-weight:600;
+                   cursor:pointer; width:100%; text-align:left; }
+  #layers button:hover { color:var(--accent); }
+  #layersPanel { padding:4px 12px 8px; display:flex; flex-direction:column; gap:3px; font-size:12px; }
   #busy { position:absolute; z-index:3; top:8px; right:8px; padding:4px 10px; background:rgba(255,255,255,.95);
           border:1px solid var(--line); border-radius:6px; display:none; }
 </style>
@@ -63,11 +69,14 @@
   <div class="ctl">
     <label>Map shows</label>
     <select id="mode">
-      <option value="time" selected>Travel time from one origin</option>
-      <option value="compare">Compare the two networks from one origin</option>
-      <option value="jobs">Jobs reachable from each hex</option>
-      <option value="destinations">Places reachable from each hex</option>
-      <option value="joblayer">Jobs located in each hex</option>
+      <option value="compare">Compare the two networks (pick an origin)</option>
+      <option value="jobs" selected>Jobs accessible from each hex</option>
+      <option value="time">Travel time from one origin</option>
+      <option value="wait">Avg wait per origin</option>
+      <option value="walk">Avg walking per origin</option>
+      <option value="in_vehicle">Avg in-vehicle per origin</option>
+      <option value="transfers">Avg transfers per origin</option>
+      <option value="joblayer"># jobs located in each hex</option>
     </select>
   </div>
 
@@ -107,27 +116,22 @@
     <input type="range" id="limit" min="5" max="120" step="5" value="60">
   </div>
 
-  <div class="ctl">
-    <label>Origin hex <span id="originMessage" style="color:#b42318"></span></label>
-    <div class="orow">
-      <input type="text" id="originInput" placeholder="paste a hex id..." spellcheck="false">
-      <button id="originSet">Set</button>
-    </div>
-  </div>
-
   <div class="hexchip">
     <span class="hid" id="hoveredHex">hover a hex...</span>
   </div>
 
-  <div class="toggles">
-    <label><input type="checkbox" id="showJobDots"> Job sizes</label>
-    <label><input type="checkbox" id="showStops"> Bus stops</label>
-    <label><input type="checkbox" id="showStreets" checked> Street map</label>
-  </div>
 </div>
 
 <div id="mapWrap">
   <div class="maptag" id="mapTag">-<small>-</small></div>
+  <div id="layers">
+    <button id="layersButton" type="button">Layers</button>
+    <div id="layersPanel" hidden>
+      <label><input type="checkbox" id="showJobDots"> # jobs</label>
+      <label><input type="checkbox" id="showStops"> Bus stops</label>
+      <label><input type="checkbox" id="showStreets" checked> Street map</label>
+    </div>
+  </div>
   <div class="legend" id="legend"></div>
   <div class="stats" id="stats">Loading...</div>
   <div id="busy">loading origin...</div>
@@ -144,12 +148,12 @@ Travel times come from a stored origin within about 600 m of the hex you click; 
 
 const TIME_BREAKS = [15, 30, 45, 60, 75, 90];
 const TIME_COLOURS = ["#1a9850", "#66bd63", "#a6d96a", "#fee08b", "#fdae61", "#f46d43", "#d73027"];
-const SEQUENTIAL = ["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"];
+const SEQUENTIAL = ["#dcdcdf", "#b4c8dd", "#6f9fc8", "#2b6cab", "#0b3a73"];
 const DIVERGING = ["#a50f15", "#ef8a62", "#f7f7f7", "#91cf60", "#006837"];
-const NO_DATA_COLOUR = "#c4c9d0";
+const NO_DATA_COLOUR = "#bdbdc2";
 
 const state = {
-  mode: "time", scenario: "revised", hour: 9, hourMode: "single",
+  mode: "jobs", scenario: "revised", hour: 9, hourMode: "single",
   periodFrom: 6, periodTo: 21, limit: 60,
   origin: -1, sampleOrigin: -1, showStops: false, showStreets: true,
 };
@@ -167,7 +171,7 @@ const COMPARE_GROUPS = { BOTH: 0, NEW: 1, LOST: 2, NEITHER: 3 };
 // Compare mode runs one green-to-red scale over "how much better is it here":
 // darkest green = newly within the threshold, then by minutes saved down to red
 // for no change. Lost hexes are purple, so they cannot be mistaken for "no change".
-const COMPARE_COLOURS = { NEW: "#00441b", LOST: "#6a51a3", NEITHER: "#ededf0" };
+const COMPARE_COLOURS = { NEW: "#00441b", LOST: "#6a51a3", NEITHER: "#bdbdc2" };
 const SAVING_COLOURS = ["#d73027", "#fc8d59", "#fee08b", "#a6d96a", "#1a9850"];
 // Trip parts the viewer can map per hex (averages over trips within the summary limit).
 const TRIP_PART_MODES = ["wait", "in_vehicle", "walk", "transfers"];
@@ -505,7 +509,7 @@ function addLayers() {
   map.addSource("streets", { type: "raster", tileSize: 256,
     tiles: ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "(c) OpenStreetMap" });
   map.addLayer({ id: "streets", type: "raster", source: "streets",
-    paint: { "raster-opacity": 0.6, "raster-saturation": -0.85, "raster-contrast": -0.15 } });
+    paint: { "raster-opacity": 0.4, "raster-saturation": -0.95, "raster-contrast": -0.2 } });
 
   map.addSource("hexes", { type: "geojson", data: hexCollection() });
   map.addLayer({ id: "hex-fill", type: "fill", source: "hexes",
@@ -595,10 +599,10 @@ function paintHexes() {
 
 function updateTag() {
   const tag = document.getElementById("mapTag");
-  const titles = { time: "Travel time from the chosen origin", compare: "What the extra buses change",
-                   jobs: "Jobs reachable", destinations: "Places reachable", joblayer: "Jobs located here",
-                   wait: "Waiting time from each hex", in_vehicle: "In-vehicle time from each hex",
-                   walk: "Walking time from each hex", transfers: "Transfers from each hex" };
+  const titles = { compare: "What the extra buses change", jobs: "Jobs accessible from each hex",
+                   time: "Travel time from the chosen origin", joblayer: "# jobs located here",
+                   wait: "Average wait per origin", in_vehicle: "Average in-vehicle time per origin",
+                   walk: "Average walking per origin", transfers: "Average transfers per origin" };
   const scenarioNames = { baseline: "baseline", revised: "revised", difference: "revised - baseline" };
   tag.innerHTML = titles[state.mode] +
     "<small>" + (state.mode === "joblayer" ? "jobs layer"
@@ -677,9 +681,6 @@ async function setOrigin(hexIndex) {
   map.getSource("origin").setData({ type: "FeatureCollection", features: [{
     type: "Feature", properties: {},
     geometry: { type: "Polygon", coordinates: [hexRing(meta.hex_ids[sampleHexIndex])] } }] });
-  document.getElementById("originInput").value = meta.hex_ids[hexIndex];
-  document.getElementById("originMessage").textContent =
-    meta.hex_ids[hexIndex] === meta.sample_origin_hex[state.sampleOrigin] ? "" : "using nearest stored origin";
   await refresh();
 }
 
@@ -689,6 +690,13 @@ async function refresh() {
 }
 
 /* ---------- controls ------------------------------------------------------ */
+
+function connectLayersBox() {
+  const button = document.getElementById("layersButton");
+  const panel = document.getElementById("layersPanel");
+  button.addEventListener("click", () => { panel.hidden = !panel.hidden; });
+}
+
 
 function connectControls() {
   document.getElementById("mode").addEventListener("change", async event => {
@@ -742,13 +750,6 @@ function connectControls() {
     document.getElementById("limitValue").textContent = state.limit + " min";
     await refresh();
   });
-  document.getElementById("originSet").addEventListener("click", async () => {
-    const input = document.getElementById("originInput");
-    const index = meta.hex_ids.indexOf(input.value.trim());
-    if (index < 0) { input.classList.add("bad"); document.getElementById("originMessage").textContent = "unknown hex"; return; }
-    input.classList.remove("bad");
-    await setOrigin(index);
-  });
   document.getElementById("showStops").addEventListener("change", event => {
     map.setLayoutProperty("stops", "visibility", event.target.checked ? "visible" : "none");
   });
@@ -781,6 +782,7 @@ function waitForMapReady() {
   await waitForMapReady();
   addLayers();
   connectControls();
+  connectLayersBox();
   document.getElementById("stats").textContent = "Click a hex to choose an origin.";
   await refresh();
 }());
