@@ -62,6 +62,7 @@
     <label>Map shows</label>
     <select id="mode">
       <option value="time" selected>Travel time from one origin</option>
+      <option value="compare">Compare the two networks from one origin</option>
       <option value="jobs">Jobs reachable from each hex</option>
       <option value="destinations">Places reachable from each hex</option>
       <option value="joblayer">Jobs located in each hex</option>
@@ -139,6 +140,14 @@ let originTimes = null;                // travel times of the chosen origin, bot
 const originCache = new Map();         // sample origin number -> Uint8Array
 const summaryCache = new Map();        // "jobs_revised_60" -> typed array
 let currentValues = null;              // what is drawn right now, one number per hex
+let currentGroups = null;              // compare mode: which group each hex is in (see COMPARE_GROUPS)
+
+// Compare mode groups a hex by whether it is within the threshold in each network.
+const COMPARE_GROUPS = { BOTH: 0, NEW: 1, LOST: 2, NEITHER: 3 };
+const COMPARE_COLOURS = { NEW: "#238b45", LOST: "#d73027", NEITHER: NO_DATA_COLOUR };
+// Reachable in both: shaded by how many minutes the revised trip saves.
+const SAVING_COLOURS = ["#c6dbef", "#9ecae1", "#6baed6", "#3182bd", "#08306b"];
+const LARGEST_SHOWN_SAVING = 30;       // minutes; more than this uses the darkest shade
 
 /* ---------- loading files ------------------------------------------------- */
 
@@ -194,6 +203,27 @@ async function computeValues() {
   const values = new Float64Array(count).fill(NaN);
   if (state.mode === "joblayer") {
     for (let hex = 0; hex < count; hex++) values[hex] = meta.jobs_per_hex[hex];
+    return values;
+  }
+  if (state.mode === "compare") {
+    currentGroups = new Uint8Array(count).fill(COMPARE_GROUPS.NEITHER);
+    if (state.sampleOrigin < 0) return values;
+    for (let hex = 0; hex < count; hex++) {
+      const baseline = minutesFromOrigin("baseline", hex, state.hour);
+      const revised = minutesFromOrigin("revised", hex, state.hour);
+      const inBaseline = baseline !== null && baseline <= state.limit;
+      const inRevised = revised !== null && revised <= state.limit;
+      if (inBaseline && inRevised) {
+        currentGroups[hex] = COMPARE_GROUPS.BOTH;
+        values[hex] = baseline - revised;                 // minutes saved (0 or more)
+      } else if (inRevised) {
+        currentGroups[hex] = COMPARE_GROUPS.NEW;
+        values[hex] = baseline === null ? NaN : baseline - revised;
+      } else if (inBaseline) {
+        currentGroups[hex] = COMPARE_GROUPS.LOST;
+        values[hex] = revised === null ? NaN : baseline - revised;
+      }
+    }
     return values;
   }
   if (state.mode === "time") {
@@ -252,8 +282,20 @@ function travelTimeColour(minutes) {
   return TIME_COLOURS[TIME_COLOURS.length - 1];
 }
 
+function savingColour(minutesSaved) {
+  const position = Math.min(1, Math.max(0, minutesSaved / LARGEST_SHOWN_SAVING));
+  return rampColour(SAVING_COLOURS, position);
+}
+
 function colourOf(hex, low, high) {
   const value = currentValues[hex];
+  if (state.mode === "compare") {
+    const group = currentGroups[hex];
+    if (group === COMPARE_GROUPS.NEW) return COMPARE_COLOURS.NEW;
+    if (group === COMPARE_GROUPS.LOST) return COMPARE_COLOURS.LOST;
+    if (group === COMPARE_GROUPS.BOTH) return savingColour(isFinite(value) ? value : 0);
+    return COMPARE_COLOURS.NEITHER;
+  }
   if (!isFinite(value)) return NO_DATA_COLOUR;
   if (state.mode === "time") {
     if (state.scenario === "difference") {
@@ -272,6 +314,20 @@ function colourOf(hex, low, high) {
 function buildLegend(low, high) {
   const legend = document.getElementById("legend");
   let html = "";
+  if (state.mode === "compare") {
+    html += '<span><i class="sw" style="background:' + COMPARE_COLOURS.NEW +
+            '"></i>newly within ' + state.limit + " min</span>";
+    [0, 5, 10, 20, 30].forEach(saved => {
+      html += '<span><i class="sw" style="background:' + savingColour(saved) + '"></i>' +
+              (saved === 0 ? "already reachable, no change" :
+               saved === 30 ? "saves 30+ min" : "saves " + saved + " min") + "</span>";
+    });
+    html += '<span><i class="sw" style="background:' + COMPARE_COLOURS.LOST + '"></i>no longer within</span>';
+    html += '<span><i class="sw" style="background:' + NO_DATA_COLOUR + '"></i>beyond ' +
+            state.limit + " min in both</span>";
+    legend.innerHTML = html;
+    return;
+  }
   if (state.mode === "time" && state.scenario !== "difference") {
     let previous = 0;
     TIME_BREAKS.forEach((edge, index) => {
@@ -380,7 +436,7 @@ function hexPopup(index) {
   const zone = meta.zone_labels[meta.zone_of_hex[index]];
   let html = '<div class="pid">' + meta.hex_ids[index] + "</div>" +
              "<div>zone " + zone + " &middot; " + formatNumber(meta.jobs_per_hex[index], 0) + " jobs here</div>";
-  if (state.mode === "time" && state.sampleOrigin >= 0) {
+  if ((state.mode === "time" || state.mode === "compare") && state.sampleOrigin >= 0) {
     const baseline = minutesFromOrigin("baseline", index, state.hour);
     const revised = minutesFromOrigin("revised", index, state.hour);
     html += "<div>baseline <b>" + (baseline === null ? "not reachable" : baseline + " min") + "</b></div>" +
@@ -388,6 +444,13 @@ function hexPopup(index) {
     if (baseline !== null && revised !== null) {
       const change = revised - baseline;
       html += "<div>change <b>" + (change > 0 ? "+" : "") + change + " min</b></div>";
+    }
+    if (state.mode === "compare") {
+      const group = currentGroups[index];
+      const names = { 0: "reachable in both", 1: "newly within " + state.limit + " min",
+                      2: "no longer within " + state.limit + " min",
+                      3: "beyond " + state.limit + " min in both" };
+      html += "<div><b>" + names[group] + "</b></div>";
     }
   } else if (state.mode !== "joblayer") {
     html += "<div>" + (state.mode === "jobs" ? "jobs" : "places") + " within " + nearestTimeLimit() +
@@ -414,11 +477,13 @@ function paintHexes() {
 
 function updateTag() {
   const tag = document.getElementById("mapTag");
-  const titles = { time: "Travel time from the chosen origin", jobs: "Jobs reachable",
-                   destinations: "Places reachable", joblayer: "Jobs located here" };
+  const titles = { time: "Travel time from the chosen origin", compare: "What the extra buses change",
+                   jobs: "Jobs reachable", destinations: "Places reachable", joblayer: "Jobs located here" };
   const scenarioNames = { baseline: "baseline", revised: "revised", difference: "revised - baseline" };
   tag.innerHTML = titles[state.mode] +
-    "<small>" + (state.mode === "joblayer" ? "jobs layer" : scenarioNames[state.scenario]) +
+    "<small>" + (state.mode === "joblayer" ? "jobs layer"
+                 : state.mode === "compare" ? "within " + state.limit + " min"
+                 : scenarioNames[state.scenario]) +
     (state.mode === "joblayer" ? "" : " &middot; leaving " + hourText(state.hour)) +
     (state.mode === "jobs" || state.mode === "destinations" ? " &middot; within " + nearestTimeLimit() + " min" : "") +
     "</small>";
@@ -426,6 +491,35 @@ function updateTag() {
 
 async function updateStats(low, high) {
   const stats = document.getElementById("stats");
+  if (state.mode === "compare") {
+    if (state.sampleOrigin < 0) { stats.innerHTML = "Click a hex to choose an origin."; return; }
+    const jobs = [0, 0, 0, 0], hexes = [0, 0, 0, 0];
+    let savedMinutesWeighted = 0, jobsWithSaving = 0;
+    for (let hex = 0; hex < meta.hexes; hex++) {
+      const group = currentGroups[hex];
+      jobs[group] += meta.jobs_per_hex[hex];
+      hexes[group]++;
+      if (group === COMPARE_GROUPS.BOTH && isFinite(currentValues[hex])) {
+        savedMinutesWeighted += currentValues[hex] * meta.jobs_per_hex[hex];
+        jobsWithSaving += meta.jobs_per_hex[hex];
+      }
+    }
+    const reachableBefore = jobs[COMPARE_GROUPS.BOTH] + jobs[COMPARE_GROUPS.LOST];
+    const reachableAfter = jobs[COMPARE_GROUPS.BOTH] + jobs[COMPARE_GROUPS.NEW];
+    stats.innerHTML =
+      "Within <b>" + state.limit + " min</b> leaving <b>" + hourText(state.hour) + "</b> from <b>" +
+      meta.sample_origin_hex[state.sampleOrigin] + "</b>: jobs <b>" + formatNumber(reachableBefore, 0) +
+      "</b> &rarr; <b>" + formatNumber(reachableAfter, 0) + "</b> (" +
+      (reachableAfter - reachableBefore >= 0 ? "+" : "") +
+      formatNumber(reachableAfter - reachableBefore, 0) + ") &middot; newly reachable <b>" +
+      formatNumber(jobs[COMPARE_GROUPS.NEW], 0) + " jobs</b> in " +
+      formatNumber(hexes[COMPARE_GROUPS.NEW], 0) + " hexes" +
+      (jobs[COMPARE_GROUPS.LOST] > 0 ? " &middot; lost <b>" + formatNumber(jobs[COMPARE_GROUPS.LOST], 0) +
+        " jobs</b>" : "") +
+      " &middot; already reachable ones save <b>" +
+      formatNumber(jobsWithSaving ? savedMinutesWeighted / jobsWithSaving : 0, 1) + " min</b> on average";
+    return;
+  }
   if (state.mode === "time") {
     if (state.sampleOrigin < 0) { stats.innerHTML = "Click a hex to choose an origin."; return; }
     let reachable = 0, jobs = 0;
@@ -477,6 +571,8 @@ async function refresh() {
 function connectControls() {
   document.getElementById("mode").addEventListener("change", async event => {
     state.mode = event.target.value;
+    // Compare mode shows both networks at once, and the jobs layer has no network.
+    document.getElementById("scenario").disabled = state.mode === "compare" || state.mode === "joblayer";
     await refresh();
   });
   document.getElementById("scenario").addEventListener("change", async event => {

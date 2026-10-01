@@ -52,3 +52,17 @@ this repository.
 Travel times were computed with ULTRA/RAPTOR over the Delhi bus GTFS and the OpenStreetMap
 walking network, for every pair of 8,192 hexes and every departure hour. The revised
 timetable is the same routes with each gap between buses split in two.
+
+## Compare view
+
+"Compare the two networks from one origin" shows, for the chosen origin, hour and
+threshold:
+
+- **green** — places that come within the threshold only with the extra buses
+- **blue shades** — places already within the threshold, shaded by how many minutes
+  the trip now saves (pale = no change, dark = 30 minutes or more)
+- **red** — places that fall outside the threshold in the revised network
+- **grey** — beyond the threshold in both
+
+The bar at the bottom gives the jobs reachable before and after, the jobs newly
+reachable, and the average time saved on trips that already worked.
