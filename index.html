@@ -67,10 +67,6 @@
       <option value="compare">Compare the two networks from one origin</option>
       <option value="jobs">Jobs reachable from each hex</option>
       <option value="destinations">Places reachable from each hex</option>
-      <option value="wait">Waiting time from each hex</option>
-      <option value="in_vehicle">In-vehicle time from each hex</option>
-      <option value="walk">Walking time from each hex</option>
-      <option value="transfers">Transfers from each hex</option>
       <option value="joblayer">Jobs located in each hex</option>
     </select>
   </div>
@@ -125,7 +121,6 @@
 
   <div class="toggles">
     <label><input type="checkbox" id="showJobDots"> Job sizes</label>
-    <label><input type="checkbox" id="showRoutes"> Bus routes</label>
     <label><input type="checkbox" id="showStops"> Bus stops</label>
     <label><input type="checkbox" id="showStreets" checked> Street map</label>
   </div>
@@ -166,7 +161,6 @@ const originCache = new Map();         // sample origin number -> Uint8Array
 const summaryCache = new Map();        // "jobs_revised_60" -> typed array
 let currentValues = null;              // what is drawn right now, one number per hex
 let currentGroups = null;              // compare mode: which group each hex is in (see COMPARE_GROUPS)
-let routesLoaded = false;              // the bus-route lines are fetched the first time they are shown
 
 // Compare mode groups a hex by whether it is within the threshold in each network.
 const COMPARE_GROUPS = { BOTH: 0, NEW: 1, LOST: 2, NEITHER: 3 };
@@ -511,7 +505,7 @@ function addLayers() {
   map.addSource("streets", { type: "raster", tileSize: 256,
     tiles: ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "(c) OpenStreetMap" });
   map.addLayer({ id: "streets", type: "raster", source: "streets",
-    paint: { "raster-opacity": 0.8, "raster-saturation": -0.7, "raster-contrast": -0.05 } });
+    paint: { "raster-opacity": 0.6, "raster-saturation": -0.85, "raster-contrast": -0.15 } });
 
   map.addSource("hexes", { type: "geojson", data: hexCollection() });
   map.addLayer({ id: "hex-fill", type: "fill", source: "hexes",
@@ -532,27 +526,6 @@ function addLayers() {
                                16, ["*", 0.25, ["sqrt", ["get", "jobs"]]]],
              "circle-color": "#111827", "circle-opacity": 0.5 } });
 
-  // Bus routes: one line per route, loaded the first time they are switched on.
-  map.addSource("routes", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-  map.addLayer({ id: "routes", type: "line", source: "routes", layout: { visibility: "none" },
-    paint: { "line-color": "#5b3a9b",
-             "line-width": ["interpolate", ["linear"], ["zoom"], 9, 0.3, 12, 0.8, 15, 1.8],
-             "line-opacity": 0.5 } });
-  // A wide see-through copy of the same lines, so they can be hovered: the drawn
-  // lines are under a pixel wide at city zoom and would be impossible to hit.
-  map.addLayer({ id: "routes-hover", type: "line", source: "routes", layout: { visibility: "none" },
-    paint: { "line-color": "#5b3a9b", "line-width": 12, "line-opacity": 0.01 } });
-
-  map.on("mousemove", "routes-hover", event => {
-    const route = event.features[0].properties;
-    map.getCanvas().style.cursor = "pointer";
-    popup.setLngLat(event.lngLat).setHTML(
-      '<div class="pid">' + route.name + "</div><div>route " + route.route + "</div>" +
-      "<div>trips a day: <b>" + formatNumber(route.trips_baseline, 0) + "</b> baseline, <b>" +
-      formatNumber(route.trips_revised, 0) + "</b> revised</div>").addTo(map);
-  });
-  map.on("mouseleave", "routes-hover", () => { map.getCanvas().style.cursor = ""; popup.remove(); });
-
   const stops = meta.bus_stops;
   map.addSource("stops", { type: "geojson", data: { type: "FeatureCollection",
     features: stops.latitude.map((latitude, index) => ({
@@ -565,13 +538,6 @@ function addLayers() {
   popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
   map.on("click", "hex-fill", event => setOrigin(event.features[0].properties.index));
   map.on("mousemove", "hex-fill", event => {
-    // When the route lines are on and the pointer is over one, let the route
-    // popup win: the hex is still named in the chip at the top.
-    if (map.getLayoutProperty("routes-hover", "visibility") === "visible" &&
-        map.queryRenderedFeatures(event.point, { layers: ["routes-hover"] }).length) {
-      document.getElementById("hoveredHex").textContent = meta.hex_ids[event.features[0].properties.index];
-      return;
-    }
     const index = event.features[0].properties.index;
     map.getCanvas().style.cursor = "pointer";
     document.getElementById("hoveredHex").textContent = meta.hex_ids[index];
@@ -765,19 +731,6 @@ function connectControls() {
   }));
   document.getElementById("showJobDots").addEventListener("change", event => {
     map.setLayoutProperty("jobDots", "visibility", event.target.checked ? "visible" : "none");
-  });
-  document.getElementById("showRoutes").addEventListener("change", async event => {
-    if (event.target.checked && !routesLoaded) {
-      document.getElementById("busy").style.display = "block";
-      const response = await fetch("data/routes.geojson.gz");
-      const stream = response.body.pipeThrough(new DecompressionStream("gzip"));
-      map.getSource("routes").setData(await new Response(stream).json());
-      routesLoaded = true;
-      document.getElementById("busy").style.display = "none";
-    }
-    const visibility = event.target.checked ? "visible" : "none";
-    map.setLayoutProperty("routes", "visibility", visibility);
-    map.setLayoutProperty("routes-hover", "visibility", visibility);
   });
   document.getElementById("hour").addEventListener("input", async event => {
     state.hour = Number(event.target.value);
