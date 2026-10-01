@@ -67,6 +67,10 @@
       <option value="compare">Compare the two networks from one origin</option>
       <option value="jobs">Jobs reachable from each hex</option>
       <option value="destinations">Places reachable from each hex</option>
+      <option value="wait">Waiting time from each hex</option>
+      <option value="in_vehicle">In-vehicle time from each hex</option>
+      <option value="walk">Walking time from each hex</option>
+      <option value="transfers">Transfers from each hex</option>
       <option value="joblayer">Jobs located in each hex</option>
     </select>
   </div>
@@ -120,6 +124,7 @@
   </div>
 
   <div class="toggles">
+    <label><input type="checkbox" id="showJobDots"> Job sizes</label>
     <label><input type="checkbox" id="showRoutes"> Bus routes</label>
     <label><input type="checkbox" id="showStops"> Bus stops</label>
     <label><input type="checkbox" id="showStreets" checked> Street map</label>
@@ -165,11 +170,13 @@ let routesLoaded = false;              // the bus-route lines are fetched the fi
 
 // Compare mode groups a hex by whether it is within the threshold in each network.
 const COMPARE_GROUPS = { BOTH: 0, NEW: 1, LOST: 2, NEITHER: 3 };
-// Colours chosen to stay apart from each other: green for new, blues for already
-// reachable, red for lost, near-white for beyond the threshold.
-const COMPARE_COLOURS = { NEW: "#00a05a", LOST: "#e31a1c", NEITHER: "#ededf0" };
-// Reachable in both: shaded by how many minutes the revised trip saves.
-const SAVING_COLOURS = ["#b9d9ee", "#7fb6e0", "#3d84c6", "#1a53a0", "#0b2c6b"];
+// Compare mode runs one green-to-red scale over "how much better is it here":
+// darkest green = newly within the threshold, then by minutes saved down to red
+// for no change. Lost hexes are purple, so they cannot be mistaken for "no change".
+const COMPARE_COLOURS = { NEW: "#00441b", LOST: "#6a51a3", NEITHER: "#ededf0" };
+const SAVING_COLOURS = ["#d73027", "#fc8d59", "#fee08b", "#a6d96a", "#1a9850"];
+// Trip parts the viewer can map per hex (averages over trips within the summary limit).
+const TRIP_PART_MODES = ["wait", "in_vehicle", "walk", "transfers"];
 const LARGEST_SHOWN_SAVING = 30;       // minutes; more than this uses the darkest shade
 
 /* ---------- loading files ------------------------------------------------- */
@@ -297,6 +304,29 @@ async function computeValues() {
     }
     return values;
   }
+  if (TRIP_PART_MODES.includes(state.mode)) {
+    // Average wait / in-vehicle / walk / transfers over this hex's trips within
+    // the summary limit, stored per origin and hour.
+    const baselineArray = await partArray("baseline", state.mode);
+    const revisedArray = await partArray("revised", state.mode);
+    const factor = meta.trip_parts[state.mode];
+    const hours = chosenHours();
+    for (let hex = 0; hex < count; hex++) {
+      let beforeSum = 0, afterSum = 0, counted = 0;
+      for (let index = 0; index < hours.length; index++) {
+        const position = hours[index] * count + hex;
+        if (baselineArray[position] === 0 && revisedArray[position] === 0) continue;
+        beforeSum += baselineArray[position];
+        afterSum += revisedArray[position];
+        counted++;
+      }
+      if (!counted) continue;
+      const before = beforeSum / counted / factor, after = afterSum / counted / factor;
+      values[hex] = state.scenario === "difference" ? after - before
+                  : state.scenario === "baseline" ? before : after;
+    }
+    return values;
+  }
   const limit = nearestTimeLimit();
   const kind = state.mode === "jobs" ? "jobs" : "destinations";
   const baseline = await summaryArray(kind, "baseline", limit);
@@ -378,10 +408,10 @@ function buildLegend(low, high) {
   let html = "";
   if (state.mode === "compare") {
     html += '<span><i class="sw" style="background:' + COMPARE_COLOURS.NEW +
-            '"></i>newly within ' + state.limit + " min</span>";
-    [0, 5, 10, 20, 30].forEach(saved => {
+            '"></i><b>newly within ' + state.limit + " min</b></span>";
+    [30, 20, 10, 5, 0].forEach(saved => {
       html += '<span><i class="sw" style="background:' + savingColour(saved) + '"></i>' +
-              (saved === 0 ? "already reachable, no change" :
+              (saved === 0 ? "no time saved" :
                saved === 30 ? "saves 30+ min" : "saves " + saved + " min") + "</span>";
     });
     html += '<span><i class="sw" style="background:' + COMPARE_COLOURS.LOST + '"></i>no longer within</span>';
@@ -427,6 +457,8 @@ function formatNumber(value, decimals) {
 function formatValue(value) {
   if (!isFinite(value)) return "-";
   if (state.mode === "time") return formatNumber(value, 0) + " min";
+  if (state.mode === "transfers") return formatNumber(value, 2);
+  if (TRIP_PART_MODES.includes(state.mode)) return formatNumber(value, 1) + " min";
   return formatNumber(value, 0);
 }
 function hourText(hour) { return String(hour).padStart(2, "0") + ":00"; }
@@ -459,6 +491,20 @@ function buildHexFeatures() {
 
 function hexCollection() { return { type: "FeatureCollection", features: hexFeatures }; }
 
+function jobDotCollection() {
+  // One dot per hex that has jobs, placed at the hex centre; the circle layer
+  // sizes it by the square root of the jobs, so area reads as the number of jobs.
+  const features = [];
+  meta.hex_ids.forEach((hexId, index) => {
+    const jobs = meta.jobs_per_hex[index];
+    if (jobs <= 0) return;
+    const centre = h3.cellToLatLng(hexId);
+    features.push({ type: "Feature", properties: { jobs: jobs },
+                    geometry: { type: "Point", coordinates: [centre[1], centre[0]] } });
+  });
+  return { type: "FeatureCollection", features: features };
+}
+
 function addLayers() {
   // The street map is only there for orientation, so it is faded to near grey and
   // kept pale; the hex colours should be what the eye lands on.
@@ -477,11 +523,35 @@ function addLayers() {
   map.addLayer({ id: "origin-line", type: "line", source: "origin",
     paint: { "line-color": "#1030d8", "line-width": 3 } });
 
+  // Job sizes: a dot on each hex, its area growing with the jobs in that hex.
+  map.addSource("jobDots", { type: "geojson", data: jobDotCollection() });
+  map.addLayer({ id: "jobDots", type: "circle", source: "jobDots", layout: { visibility: "none" },
+    paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"],
+                               9, ["*", 0.045, ["sqrt", ["get", "jobs"]]],
+                               13, ["*", 0.11, ["sqrt", ["get", "jobs"]]],
+                               16, ["*", 0.25, ["sqrt", ["get", "jobs"]]]],
+             "circle-color": "#111827", "circle-opacity": 0.5 } });
+
   // Bus routes: one line per route, loaded the first time they are switched on.
   map.addSource("routes", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
   map.addLayer({ id: "routes", type: "line", source: "routes", layout: { visibility: "none" },
-    paint: { "line-color": "#6a3d9a", "line-width": ["interpolate", ["linear"], ["zoom"], 9, 0.6, 14, 2],
-             "line-opacity": 0.75 } });
+    paint: { "line-color": "#5b3a9b",
+             "line-width": ["interpolate", ["linear"], ["zoom"], 9, 0.3, 12, 0.8, 15, 1.8],
+             "line-opacity": 0.5 } });
+  // A wide see-through copy of the same lines, so they can be hovered: the drawn
+  // lines are under a pixel wide at city zoom and would be impossible to hit.
+  map.addLayer({ id: "routes-hover", type: "line", source: "routes", layout: { visibility: "none" },
+    paint: { "line-color": "#5b3a9b", "line-width": 12, "line-opacity": 0.01 } });
+
+  map.on("mousemove", "routes-hover", event => {
+    const route = event.features[0].properties;
+    map.getCanvas().style.cursor = "pointer";
+    popup.setLngLat(event.lngLat).setHTML(
+      '<div class="pid">' + route.name + "</div><div>route " + route.route + "</div>" +
+      "<div>trips a day: <b>" + formatNumber(route.trips_baseline, 0) + "</b> baseline, <b>" +
+      formatNumber(route.trips_revised, 0) + "</b> revised</div>").addTo(map);
+  });
+  map.on("mouseleave", "routes-hover", () => { map.getCanvas().style.cursor = ""; popup.remove(); });
 
   const stops = meta.bus_stops;
   map.addSource("stops", { type: "geojson", data: { type: "FeatureCollection",
@@ -495,6 +565,13 @@ function addLayers() {
   popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
   map.on("click", "hex-fill", event => setOrigin(event.features[0].properties.index));
   map.on("mousemove", "hex-fill", event => {
+    // When the route lines are on and the pointer is over one, let the route
+    // popup win: the hex is still named in the chip at the top.
+    if (map.getLayoutProperty("routes-hover", "visibility") === "visible" &&
+        map.queryRenderedFeatures(event.point, { layers: ["routes-hover"] }).length) {
+      document.getElementById("hoveredHex").textContent = meta.hex_ids[event.features[0].properties.index];
+      return;
+    }
     const index = event.features[0].properties.index;
     map.getCanvas().style.cursor = "pointer";
     document.getElementById("hoveredHex").textContent = meta.hex_ids[index];
@@ -523,6 +600,10 @@ function hexPopup(index) {
                       3: "beyond " + state.limit + " min in both" };
       html += "<div><b>" + names[group] + "</b></div>";
     }
+  } else if (TRIP_PART_MODES.includes(state.mode)) {
+    const names = { wait: "waiting", in_vehicle: "in-vehicle", walk: "walking", transfers: "transfers" };
+    html += "<div>average " + names[state.mode] + " on trips within " + meta.summary_limit + " min, " +
+            timeOfDayText() + ": <b>" + formatValue(currentValues[index]) + "</b></div>";
   } else if (state.mode !== "joblayer") {
     html += "<div>" + (state.mode === "jobs" ? "jobs" : "places") + " within " + nearestTimeLimit() +
             " min, " + timeOfDayText() + ": <b>" + formatValue(currentValues[index]) + "</b></div>";
@@ -549,7 +630,9 @@ function paintHexes() {
 function updateTag() {
   const tag = document.getElementById("mapTag");
   const titles = { time: "Travel time from the chosen origin", compare: "What the extra buses change",
-                   jobs: "Jobs reachable", destinations: "Places reachable", joblayer: "Jobs located here" };
+                   jobs: "Jobs reachable", destinations: "Places reachable", joblayer: "Jobs located here",
+                   wait: "Waiting time from each hex", in_vehicle: "In-vehicle time from each hex",
+                   walk: "Walking time from each hex", transfers: "Transfers from each hex" };
   const scenarioNames = { baseline: "baseline", revised: "revised", difference: "revised - baseline" };
   tag.innerHTML = titles[state.mode] +
     "<small>" + (state.mode === "joblayer" ? "jobs layer"
@@ -557,6 +640,8 @@ function updateTag() {
                  : scenarioNames[state.scenario]) +
     (state.mode === "joblayer" ? "" : " &middot; " + timeOfDayText()) +
     (state.mode === "jobs" || state.mode === "destinations" ? " &middot; within " + nearestTimeLimit() + " min" : "") +
+    (TRIP_PART_MODES.includes(state.mode)
+      ? " &middot; average over trips within " + meta.summary_limit + " min" : "") +
     "</small>";
 }
 
@@ -678,6 +763,9 @@ function connectControls() {
       hourText(state.periodFrom) + "-" + hourText(state.periodTo);
     await refresh();
   }));
+  document.getElementById("showJobDots").addEventListener("change", event => {
+    map.setLayoutProperty("jobDots", "visibility", event.target.checked ? "visible" : "none");
+  });
   document.getElementById("showRoutes").addEventListener("change", async event => {
     if (event.target.checked && !routesLoaded) {
       document.getElementById("busy").style.display = "block";
@@ -687,7 +775,9 @@ function connectControls() {
       routesLoaded = true;
       document.getElementById("busy").style.display = "none";
     }
-    map.setLayoutProperty("routes", "visibility", event.target.checked ? "visible" : "none");
+    const visibility = event.target.checked ? "visible" : "none";
+    map.setLayoutProperty("routes", "visibility", visibility);
+    map.setLayoutProperty("routes-hover", "visibility", visibility);
   });
   document.getElementById("hour").addEventListener("input", async event => {
     state.hour = Number(event.target.value);
