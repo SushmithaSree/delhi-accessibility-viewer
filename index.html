@@ -84,11 +84,17 @@
     <label>Time of day</label>
     <select id="hourMode">
       <option value="single" selected>One departure hour</option>
-      <option value="day">Average 06:00-21:00</option>
-      <option value="peakAm">Average 07:00-10:00</option>
-      <option value="peakPm">Average 17:00-20:00</option>
-      <option value="all">Average all 24 hours</option>
+      <option value="period">Average of a period</option>
     </select>
+  </div>
+
+  <div class="ctl" id="periodControl" style="display:none">
+    <label>Period <span class="val" id="periodValue">06:00-21:00</span></label>
+    <div class="orow">
+      <select id="periodFrom"></select>
+      <span style="color:var(--muted)">to</span>
+      <select id="periodTo"></select>
+    </div>
   </div>
 
   <div class="ctl" id="hourControl">
@@ -114,6 +120,7 @@
   </div>
 
   <div class="toggles">
+    <label><input type="checkbox" id="showRoutes"> Bus routes</label>
     <label><input type="checkbox" id="showStops"> Bus stops</label>
     <label><input type="checkbox" id="showStreets" checked> Street map</label>
   </div>
@@ -141,18 +148,9 @@ const SEQUENTIAL = ["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"];
 const DIVERGING = ["#a50f15", "#ef8a62", "#f7f7f7", "#91cf60", "#006837"];
 const NO_DATA_COLOUR = "#c4c9d0";
 
-// Which departure hours each "time of day" choice covers.
-const HOUR_SETS = {
-  day: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
-  peakAm: [7, 8, 9, 10],
-  peakPm: [17, 18, 19, 20],
-  all: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
-};
-const HOUR_SET_NAMES = { day: "06:00-21:00 average", peakAm: "07:00-10:00 average",
-                         peakPm: "17:00-20:00 average", all: "24-hour average" };
-
 const state = {
-  mode: "time", scenario: "revised", hour: 9, hourMode: "single", limit: 60,
+  mode: "time", scenario: "revised", hour: 9, hourMode: "single",
+  periodFrom: 6, periodTo: 21, limit: 60,
   origin: -1, sampleOrigin: -1, showStops: false, showStreets: true,
 };
 
@@ -163,6 +161,7 @@ const originCache = new Map();         // sample origin number -> Uint8Array
 const summaryCache = new Map();        // "jobs_revised_60" -> typed array
 let currentValues = null;              // what is drawn right now, one number per hex
 let currentGroups = null;              // compare mode: which group each hex is in (see COMPARE_GROUPS)
+let routesLoaded = false;              // the bus-route lines are fetched the first time they are shown
 
 // Compare mode groups a hex by whether it is within the threshold in each network.
 const COMPARE_GROUPS = { BOTH: 0, NEW: 1, LOST: 2, NEITHER: 3 };
@@ -221,11 +220,23 @@ function minutesFromOrigin(scenario, hex, hour) {
 }
 
 function chosenHours() {
-  return state.hourMode === "single" ? [state.hour] : HOUR_SETS[state.hourMode];
+  // One hour, or every hour of the chosen period. A period may run past midnight
+  // (22:00 to 05:00), in which case it wraps around.
+  if (state.hourMode === "single") return [state.hour];
+  const hours = [];
+  let hour = state.periodFrom;
+  for (let step = 0; step < 24; step++) {
+    hours.push(hour);
+    if (hour === state.periodTo) break;
+    hour = (hour + 1) % 24;
+  }
+  return hours;
 }
 
 function timeOfDayText() {
-  return state.hourMode === "single" ? "leaving " + hourText(state.hour) : HOUR_SET_NAMES[state.hourMode];
+  if (state.hourMode === "single") return "leaving " + hourText(state.hour);
+  return "average of " + hourText(state.periodFrom) + "-" + hourText(state.periodTo) +
+         " (" + chosenHours().length + (chosenHours().length === 1 ? " departure)" : " departures)");
 }
 
 function averageMinutesFromOrigin(scenario, hex) {
@@ -454,8 +465,7 @@ function addLayers() {
   map.addSource("streets", { type: "raster", tileSize: 256,
     tiles: ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "(c) OpenStreetMap" });
   map.addLayer({ id: "streets", type: "raster", source: "streets",
-    paint: { "raster-opacity": 0.45, "raster-saturation": -0.95, "raster-contrast": -0.25,
-             "raster-brightness-min": 0.35 } });
+    paint: { "raster-opacity": 0.8, "raster-saturation": -0.7, "raster-contrast": -0.05 } });
 
   map.addSource("hexes", { type: "geojson", data: hexCollection() });
   map.addLayer({ id: "hex-fill", type: "fill", source: "hexes",
@@ -466,6 +476,12 @@ function addLayers() {
   map.addSource("origin", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
   map.addLayer({ id: "origin-line", type: "line", source: "origin",
     paint: { "line-color": "#1030d8", "line-width": 3 } });
+
+  // Bus routes: one line per route, loaded the first time they are switched on.
+  map.addSource("routes", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({ id: "routes", type: "line", source: "routes", layout: { visibility: "none" },
+    paint: { "line-color": "#6a3d9a", "line-width": ["interpolate", ["linear"], ["zoom"], 9, 0.6, 14, 2],
+             "line-opacity": 0.75 } });
 
   const stops = meta.bus_stops;
   map.addSource("stops", { type: "geojson", data: { type: "FeatureCollection",
@@ -634,12 +650,44 @@ function connectControls() {
     state.scenario = event.target.value;
     await refresh();
   });
+  // Hour pickers for the period: 00:00 ... 23:00.
+  const fromSelect = document.getElementById("periodFrom");
+  const toSelect = document.getElementById("periodTo");
+  for (let hour = 0; hour < 24; hour++) {
+    [fromSelect, toSelect].forEach(select => {
+      const option = document.createElement("option");
+      option.value = String(hour);
+      option.textContent = hourText(hour);
+      select.appendChild(option);
+    });
+  }
+  fromSelect.value = String(state.periodFrom);
+  toSelect.value = String(state.periodTo);
+
   document.getElementById("hourMode").addEventListener("change", async event => {
     state.hourMode = event.target.value;
-    // The departure slider only means something when one hour is shown.
-    document.getElementById("hourControl").style.visibility =
-      state.hourMode === "single" ? "visible" : "hidden";
+    // Show the departure slider for one hour, the from/to pickers for a period.
+    document.getElementById("hourControl").style.display = state.hourMode === "single" ? "flex" : "none";
+    document.getElementById("periodControl").style.display = state.hourMode === "single" ? "none" : "flex";
     await refresh();
+  });
+  [fromSelect, toSelect].forEach(select => select.addEventListener("change", async () => {
+    state.periodFrom = Number(fromSelect.value);
+    state.periodTo = Number(toSelect.value);
+    document.getElementById("periodValue").textContent =
+      hourText(state.periodFrom) + "-" + hourText(state.periodTo);
+    await refresh();
+  }));
+  document.getElementById("showRoutes").addEventListener("change", async event => {
+    if (event.target.checked && !routesLoaded) {
+      document.getElementById("busy").style.display = "block";
+      const response = await fetch("data/routes.geojson.gz");
+      const stream = response.body.pipeThrough(new DecompressionStream("gzip"));
+      map.getSource("routes").setData(await new Response(stream).json());
+      routesLoaded = true;
+      document.getElementById("busy").style.display = "none";
+    }
+    map.setLayoutProperty("routes", "visibility", event.target.checked ? "visible" : "none");
   });
   document.getElementById("hour").addEventListener("input", async event => {
     state.hour = Number(event.target.value);
