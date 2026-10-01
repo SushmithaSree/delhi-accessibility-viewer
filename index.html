@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delhi accessibility viewer</title>
+<link href="lib/maplibre-gl.css" rel="stylesheet">
+<script src="lib/maplibre-gl.js"></script>
+<script src="lib/h3-js.umd.js"></script>
+<style>
+  :root { --bg:#fff; --panel:#f5f6f8; --ink:#1a1d24; --muted:#5b616b; --line:#d9dce1; --none:#c4c9d0; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+               font:13px/1.4 system-ui, "Segoe UI", Roboto, sans-serif; }
+  #bar { padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--line);
+         display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap; }
+  #bar h1 { font-size:14px; margin:0 10px 0 0; font-weight:600; }
+  .ctl { display:flex; flex-direction:column; gap:3px; min-width:168px; }
+  .ctl label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  .ctl .val { color:var(--ink); font-variant-numeric:tabular-nums; font-weight:600; }
+  input[type=range] { width:100%; accent-color:#2f6fed; }
+  select { font-size:13px; padding:4px 6px; border:1px solid var(--line); border-radius:5px; background:#fff; }
+  .orow { display:flex; gap:6px; }
+  .orow input { font-family:ui-monospace, Consolas, monospace; font-size:12px; padding:3px 6px;
+                border:1px solid var(--line); border-radius:5px; width:150px; }
+  .orow input.bad { border-color:#b42318; background:#fff4f3; }
+  .orow button { border:1px solid var(--line); background:#f5f6f8; border-radius:5px; padding:3px 10px;
+                 cursor:pointer; font-size:12px; }
+  .orow button:hover { background:#e9ebef; }
+  .toggles { display:flex; flex-direction:column; gap:2px; font-size:12px; color:var(--muted); }
+  .hexchip { display:flex; align-items:center; gap:8px; padding:5px 8px; background:#fff;
+             border:1px solid var(--line); border-radius:7px; }
+  .hexchip .hid { font-family:ui-monospace, Consolas, monospace; font-size:12px; font-weight:600;
+                  min-width:150px; }
+  .legend { display:flex; gap:9px; align-items:center; margin-left:auto; flex-wrap:wrap; max-width:520px; }
+  .legend span { display:inline-flex; align-items:center; gap:5px; color:var(--muted); font-size:12px; }
+  .sw { width:13px; height:13px; border-radius:3px; display:inline-block; border:1px solid rgba(0,0,0,.15); }
+  #mapWrap { position:relative; height:calc(100% - 150px); }
+  #map { position:absolute; inset:0; background:#eef0f2; }
+  .maptag { position:absolute; z-index:2; top:8px; left:8px; padding:4px 10px; background:rgba(255,255,255,.92);
+            border:1px solid var(--line); border-radius:6px; font-weight:700; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+  .maptag small { display:block; font-weight:400; color:var(--muted); font-size:10px; }
+  .stats { position:absolute; z-index:2; bottom:8px; left:8px; padding:6px 10px; background:rgba(255,255,255,.92);
+           border:1px solid var(--line); border-radius:6px; color:var(--muted);
+           font-variant-numeric:tabular-nums; box-shadow:0 1px 4px rgba(0,0,0,.08); max-width:460px; }
+  .stats b { color:var(--ink); }
+  #hint { padding:6px 14px; background:var(--panel); border-top:1px solid var(--line); color:var(--muted);
+          font-size:12px; }
+  #hint b { color:var(--ink); }
+  .maplibregl-popup-content { padding:6px 9px; font-size:12px; line-height:1.5; }
+  .maplibregl-popup-content .pid { font-family:ui-monospace, Consolas, monospace; font-weight:700; }
+  #busy { position:absolute; z-index:3; top:8px; right:8px; padding:4px 10px; background:rgba(255,255,255,.95);
+          border:1px solid var(--line); border-radius:6px; display:none; }
+</style>
+</head>
+<body>
+
+<div id="bar">
+  <h1>Delhi accessibility</h1>
+
+  <div class="ctl">
+    <label>Map shows</label>
+    <select id="mode">
+      <option value="time" selected>Travel time from one origin</option>
+      <option value="jobs">Jobs reachable from each hex</option>
+      <option value="destinations">Places reachable from each hex</option>
+      <option value="joblayer">Jobs located in each hex</option>
+    </select>
+  </div>
+
+  <div class="ctl">
+    <label>Network</label>
+    <select id="scenario">
+      <option value="baseline">Baseline (today's buses)</option>
+      <option value="revised" selected>Revised (twice the buses)</option>
+      <option value="difference">Difference (revised - baseline)</option>
+    </select>
+  </div>
+
+  <div class="ctl">
+    <label>Departure <span class="val" id="hourValue">09:00</span></label>
+    <input type="range" id="hour" min="0" max="23" value="9">
+  </div>
+
+  <div class="ctl">
+    <label>Threshold <span class="val" id="limitValue">60 min</span></label>
+    <input type="range" id="limit" min="5" max="120" step="5" value="60">
+  </div>
+
+  <div class="ctl">
+    <label>Origin hex <span id="originMessage" style="color:#b42318"></span></label>
+    <div class="orow">
+      <input type="text" id="originInput" placeholder="paste a hex id..." spellcheck="false">
+      <button id="originSet">Set</button>
+    </div>
+  </div>
+
+  <div class="hexchip">
+    <span class="hid" id="hoveredHex">hover a hex...</span>
+  </div>
+
+  <div class="toggles">
+    <label><input type="checkbox" id="showStops"> Bus stops</label>
+    <label><input type="checkbox" id="showStreets" checked> Street map</label>
+  </div>
+
+  <div class="legend" id="legend"></div>
+</div>
+
+<div id="mapWrap">
+  <div class="maptag" id="mapTag">-<small>-</small></div>
+  <div class="stats" id="stats">Loading...</div>
+  <div id="busy">loading origin...</div>
+  <div id="map"></div>
+</div>
+
+<div id="hint"><b>Click</b> a hex to use it as the origin, or paste a hex id. <b>Hover</b> for its numbers.
+Travel times come from a stored origin within about 600 m of the hex you click; everything else is per hex.</div>
+
+<script>
+"use strict";
+
+/* ---------- settings shared with the builder ------------------------------ */
+
+const TIME_BREAKS = [15, 30, 45, 60, 75, 90];
+const TIME_COLOURS = ["#1a9850", "#66bd63", "#a6d96a", "#fee08b", "#fdae61", "#f46d43", "#d73027"];
+const SEQUENTIAL = ["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"];
+const DIVERGING = ["#a50f15", "#ef8a62", "#f7f7f7", "#91cf60", "#006837"];
+const NO_DATA_COLOUR = "#c4c9d0";
+
+const state = {
+  mode: "time", scenario: "revised", hour: 9, limit: 60,
+  origin: -1, sampleOrigin: -1, showStops: false, showStreets: true,
+};
+
+let meta = null;                       // data/meta.json
+let hexFeatures = [];                  // one GeoJSON feature per hex
+let originTimes = null;                // travel times of the chosen origin, both scenarios
+const originCache = new Map();         // sample origin number -> Uint8Array
+const summaryCache = new Map();        // "jobs_revised_60" -> typed array
+let currentValues = null;              // what is drawn right now, one number per hex
+
+/* ---------- loading files ------------------------------------------------- */
+
+async function loadGzip(path, ArrayKind) {
+  const response = await fetch(path);
+  if (!response.ok) throw new Error("cannot load " + path);
+  const stream = response.body.pipeThrough(new DecompressionStream("gzip"));
+  const buffer = await new Response(stream).arrayBuffer();
+  return new ArrayKind(buffer);
+}
+
+async function summaryArray(kind, scenario, limit) {
+  const key = kind + "_" + scenario + "_" + limit;
+  if (!summaryCache.has(key)) {
+    const ArrayKind = kind === "jobs" ? Uint32Array : Uint16Array;
+    summaryCache.set(key, await loadGzip("data/" + key + ".bin.gz", ArrayKind));
+  }
+  return summaryCache.get(key);
+}
+
+async function partArray(scenario, name) {
+  const key = "part_" + scenario + "_" + name;
+  if (!summaryCache.has(key)) summaryCache.set(key, await loadGzip("data/" + key + ".bin.gz", Uint16Array));
+  return summaryCache.get(key);
+}
+
+async function originArray(sampleOrigin) {
+  if (!originCache.has(sampleOrigin)) {
+    document.getElementById("busy").style.display = "block";
+    originCache.set(sampleOrigin, await loadGzip("data/origins/" + sampleOrigin + ".bin.gz", Uint8Array));
+    document.getElementById("busy").style.display = "none";
+  }
+  return originCache.get(sampleOrigin);
+}
+
+/* ---------- travel times from the chosen origin --------------------------- */
+
+const BEYOND_BAND = () => meta.longest_stored_minutes / meta.minutes_per_band + 1;
+
+function minutesFromOrigin(scenario, hex, hour) {
+  if (!originTimes) return null;
+  const perScenario = meta.hours * meta.hexes;
+  const scenarioOffset = scenario === "baseline" ? 0 : perScenario;
+  const band = originTimes[scenarioOffset + hour * meta.hexes + hex];
+  if (band >= BEYOND_BAND()) return null;                       // unreachable or very slow
+  return band * meta.minutes_per_band;
+}
+
+/* ---------- the number each hex is coloured by ---------------------------- */
+
+async function computeValues() {
+  const count = meta.hexes;
+  const values = new Float64Array(count).fill(NaN);
+  if (state.mode === "joblayer") {
+    for (let hex = 0; hex < count; hex++) values[hex] = meta.jobs_per_hex[hex];
+    return values;
+  }
+  if (state.mode === "time") {
+    if (state.sampleOrigin < 0) return values;
+    for (let hex = 0; hex < count; hex++) {
+      const baseline = minutesFromOrigin("baseline", hex, state.hour);
+      const revised = minutesFromOrigin("revised", hex, state.hour);
+      if (state.scenario === "difference") {
+        values[hex] = (baseline === null || revised === null) ? NaN : revised - baseline;
+      } else {
+        const minutes = state.scenario === "baseline" ? baseline : revised;
+        values[hex] = minutes === null ? NaN : minutes;
+      }
+    }
+    return values;
+  }
+  const limit = nearestTimeLimit();
+  const kind = state.mode === "jobs" ? "jobs" : "destinations";
+  const baseline = await summaryArray(kind, "baseline", limit);
+  const revised = await summaryArray(kind, "revised", limit);
+  const offset = state.hour * count;
+  for (let hex = 0; hex < count; hex++) {
+    const before = baseline[offset + hex], after = revised[offset + hex];
+    values[hex] = state.scenario === "difference" ? after - before
+                : state.scenario === "baseline" ? before : after;
+  }
+  return values;
+}
+
+function nearestTimeLimit() {
+  let best = meta.time_limits[0];
+  for (const limit of meta.time_limits) {
+    if (Math.abs(limit - state.limit) < Math.abs(best - state.limit)) best = limit;
+  }
+  return best;
+}
+
+/* ---------- colours ------------------------------------------------------- */
+
+function hexToRgb(colour) {
+  return [1, 3, 5].map(start => parseInt(colour.slice(start, start + 2), 16));
+}
+function mixColours(first, second, position) {
+  const a = hexToRgb(first), b = hexToRgb(second);
+  return "rgb(" + [0, 1, 2].map(part => Math.round(a[part] + (b[part] - a[part]) * position)).join(",") + ")";
+}
+function rampColour(colours, position) {
+  const clamped = Math.min(1, Math.max(0, position));
+  const slot = Math.min(colours.length - 2, Math.floor(clamped * (colours.length - 1)));
+  return mixColours(colours[slot], colours[slot + 1], clamped * (colours.length - 1) - slot);
+}
+function travelTimeColour(minutes) {
+  for (let index = 0; index < TIME_BREAKS.length; index++) {
+    if (minutes <= TIME_BREAKS[index]) return TIME_COLOURS[index];
+  }
+  return TIME_COLOURS[TIME_COLOURS.length - 1];
+}
+
+function colourOf(hex, low, high) {
+  const value = currentValues[hex];
+  if (!isFinite(value)) return NO_DATA_COLOUR;
+  if (state.mode === "time") {
+    if (state.scenario === "difference") {
+      const span = Math.max(Math.abs(low), Math.abs(high)) || 1;
+      return rampColour(DIVERGING, (-value / span + 1) / 2);         // faster (negative) = green
+    }
+    return value > state.limit ? NO_DATA_COLOUR : travelTimeColour(value);
+  }
+  if (state.scenario === "difference") {
+    const span = Math.max(Math.abs(low), Math.abs(high)) || 1;
+    return rampColour(DIVERGING, (value / span + 1) / 2);
+  }
+  return rampColour(SEQUENTIAL, high > low ? (value - low) / (high - low) : 0);
+}
+
+function buildLegend(low, high) {
+  const legend = document.getElementById("legend");
+  let html = "";
+  if (state.mode === "time" && state.scenario !== "difference") {
+    let previous = 0;
+    TIME_BREAKS.forEach((edge, index) => {
+      html += '<span><i class="sw" style="background:' + TIME_COLOURS[index] + '"></i>' +
+              previous + "-" + edge + " min</span>";
+      previous = edge;
+    });
+    html += '<span><i class="sw" style="background:' + TIME_COLOURS[TIME_COLOURS.length - 1] +
+            '"></i>&gt;' + previous + " min</span>";
+    html += '<span><i class="sw" style="background:' + NO_DATA_COLOUR +
+            '"></i>beyond threshold / unreachable</span>';
+  } else {
+    const colours = state.scenario === "difference" ? DIVERGING : SEQUENTIAL;
+    const steps = [0, 0.25, 0.5, 0.75, 1];
+    let lowEnd = low, highEnd = high;
+    if (state.scenario === "difference") {
+      const span = Math.max(Math.abs(low), Math.abs(high));
+      lowEnd = -span; highEnd = span;
+    }
+    steps.forEach(position => {
+      const value = lowEnd + (highEnd - lowEnd) * position;
+      html += '<span><i class="sw" style="background:' + rampColour(colours, position) + '"></i>' +
+              formatValue(value) + "</span>";
+    });
+  }
+  legend.innerHTML = html;
+}
+
+/* ---------- formatting ---------------------------------------------------- */
+
+function formatNumber(value, decimals) {
+  if (value === null || value === undefined || !isFinite(value)) return "-";
+  return value.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+function formatValue(value) {
+  if (!isFinite(value)) return "-";
+  if (state.mode === "time") return formatNumber(value, 0) + " min";
+  return formatNumber(value, 0);
+}
+function hourText(hour) { return String(hour).padStart(2, "0") + ":00"; }
+
+/* ---------- the map ------------------------------------------------------- */
+
+const map = new maplibregl.Map({
+  container: "map",
+  style: { version: 8, sources: {}, layers: [{ id: "background", type: "background",
+                                               paint: { "background-color": "#eef0f2" } }] },
+  center: [77.2, 28.62], zoom: 9.3, attributionControl: false,
+});
+map.addControl(new maplibregl.AttributionControl({ compact: true }));
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+let popup = null;
+
+function hexRing(hexId) {
+  const ring = h3.cellToBoundary(hexId).map(point => [point[1], point[0]]);
+  ring.push(ring[0]);
+  return ring;
+}
+
+function buildHexFeatures() {
+  hexFeatures = meta.hex_ids.map((hexId, index) => ({
+    type: "Feature", id: index,
+    properties: { index: index, colour: NO_DATA_COLOUR },
+    geometry: { type: "Polygon", coordinates: [hexRing(hexId)] },
+  }));
+}
+
+function hexCollection() { return { type: "FeatureCollection", features: hexFeatures }; }
+
+function addLayers() {
+  map.addSource("streets", { type: "raster", tileSize: 256,
+    tiles: ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "(c) OpenStreetMap" });
+  map.addLayer({ id: "streets", type: "raster", source: "streets", paint: { "raster-opacity": 0.95 } });
+
+  map.addSource("hexes", { type: "geojson", data: hexCollection() });
+  map.addLayer({ id: "hex-fill", type: "fill", source: "hexes",
+    paint: { "fill-color": ["get", "colour"], "fill-opacity": 0.6 } });
+  map.addLayer({ id: "hex-line", type: "line", source: "hexes",
+    paint: { "line-color": "#5b616b", "line-width": 0.3, "line-opacity": 0.18 } });
+
+  map.addSource("origin", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  map.addLayer({ id: "origin-line", type: "line", source: "origin",
+    paint: { "line-color": "#1030d8", "line-width": 3 } });
+
+  const stops = meta.bus_stops;
+  map.addSource("stops", { type: "geojson", data: { type: "FeatureCollection",
+    features: stops.latitude.map((latitude, index) => ({
+      type: "Feature", properties: { name: stops.name[index] },
+      geometry: { type: "Point", coordinates: [stops.longitude[index], latitude] } })) } });
+  map.addLayer({ id: "stops", type: "circle", source: "stops", layout: { visibility: "none" },
+    paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 1.8, 13, 3.5, 16, 6],
+             "circle-color": "#111827", "circle-stroke-color": "#fff", "circle-stroke-width": 1 } });
+
+  popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
+  map.on("click", "hex-fill", event => setOrigin(event.features[0].properties.index));
+  map.on("mousemove", "hex-fill", event => {
+    const index = event.features[0].properties.index;
+    map.getCanvas().style.cursor = "pointer";
+    document.getElementById("hoveredHex").textContent = meta.hex_ids[index];
+    popup.setLngLat(event.lngLat).setHTML(hexPopup(index)).addTo(map);
+  });
+  map.on("mouseleave", "hex-fill", () => { map.getCanvas().style.cursor = ""; popup.remove(); });
+}
+
+function hexPopup(index) {
+  const zone = meta.zone_labels[meta.zone_of_hex[index]];
+  let html = '<div class="pid">' + meta.hex_ids[index] + "</div>" +
+             "<div>zone " + zone + " &middot; " + formatNumber(meta.jobs_per_hex[index], 0) + " jobs here</div>";
+  if (state.mode === "time" && state.sampleOrigin >= 0) {
+    const baseline = minutesFromOrigin("baseline", index, state.hour);
+    const revised = minutesFromOrigin("revised", index, state.hour);
+    html += "<div>baseline <b>" + (baseline === null ? "not reachable" : baseline + " min") + "</b></div>" +
+            "<div>revised <b>" + (revised === null ? "not reachable" : revised + " min") + "</b></div>";
+    if (baseline !== null && revised !== null) {
+      const change = revised - baseline;
+      html += "<div>change <b>" + (change > 0 ? "+" : "") + change + " min</b></div>";
+    }
+  } else if (state.mode !== "joblayer") {
+    html += "<div>" + (state.mode === "jobs" ? "jobs" : "places") + " within " + nearestTimeLimit() +
+            " min at " + hourText(state.hour) + ": <b>" + formatValue(currentValues[index]) + "</b></div>";
+  }
+  return html;
+}
+
+function paintHexes() {
+  let low = Infinity, high = -Infinity;
+  for (let hex = 0; hex < meta.hexes; hex++) {
+    const value = currentValues[hex];
+    if (!isFinite(value)) continue;
+    if (value < low) low = value;
+    if (value > high) high = value;
+  }
+  if (!isFinite(low)) { low = 0; high = 1; }
+  for (let hex = 0; hex < meta.hexes; hex++) hexFeatures[hex].properties.colour = colourOf(hex, low, high);
+  map.getSource("hexes").setData(hexCollection());
+  buildLegend(low, high);
+  updateTag();
+  updateStats(low, high);
+}
+
+function updateTag() {
+  const tag = document.getElementById("mapTag");
+  const titles = { time: "Travel time from the chosen origin", jobs: "Jobs reachable",
+                   destinations: "Places reachable", joblayer: "Jobs located here" };
+  const scenarioNames = { baseline: "baseline", revised: "revised", difference: "revised - baseline" };
+  tag.innerHTML = titles[state.mode] +
+    "<small>" + (state.mode === "joblayer" ? "jobs layer" : scenarioNames[state.scenario]) +
+    (state.mode === "joblayer" ? "" : " &middot; leaving " + hourText(state.hour)) +
+    (state.mode === "jobs" || state.mode === "destinations" ? " &middot; within " + nearestTimeLimit() + " min" : "") +
+    "</small>";
+}
+
+async function updateStats(low, high) {
+  const stats = document.getElementById("stats");
+  if (state.mode === "time") {
+    if (state.sampleOrigin < 0) { stats.innerHTML = "Click a hex to choose an origin."; return; }
+    let reachable = 0, jobs = 0;
+    for (let hex = 0; hex < meta.hexes; hex++) {
+      const minutes = minutesFromOrigin(state.scenario === "baseline" ? "baseline" : "revised", hex, state.hour);
+      if (minutes !== null && minutes <= state.limit) { reachable++; jobs += meta.jobs_per_hex[hex]; }
+    }
+    const originHex = meta.sample_origin_hex[state.sampleOrigin];
+    stats.innerHTML = "From <b>" + originHex + "</b> leaving <b>" + hourText(state.hour) + "</b>: " +
+      "<b>" + formatNumber(reachable, 0) + "</b> hexes and <b>" + formatNumber(jobs, 0) +
+      "</b> jobs within <b>" + state.limit + " min</b> (" +
+      (state.scenario === "baseline" ? "baseline" : "revised") + ")";
+    return;
+  }
+  if (state.mode === "joblayer") {
+    stats.innerHTML = "<b>" + formatNumber(meta.jobs_in_matrix_hexes, 0) + "</b> jobs in mapped hexes of <b>" +
+      formatNumber(meta.total_jobs_in_layer, 0) + "</b> in the jobs layer";
+    return;
+  }
+  let sum = 0;
+  for (let hex = 0; hex < meta.hexes; hex++) if (isFinite(currentValues[hex])) sum += currentValues[hex];
+  stats.innerHTML = "Average per hex at " + hourText(state.hour) + ": <b>" +
+    formatValue(sum / meta.hexes) + "</b> &middot; highest <b>" + formatValue(high) + "</b>";
+}
+
+/* ---------- choosing the origin ------------------------------------------- */
+
+async function setOrigin(hexIndex) {
+  state.origin = hexIndex;
+  state.sampleOrigin = meta.sample_origin_of_hex[hexIndex];
+  originTimes = await originArray(state.sampleOrigin);
+  const sampleHexIndex = meta.hex_ids.indexOf(meta.sample_origin_hex[state.sampleOrigin]);
+  map.getSource("origin").setData({ type: "FeatureCollection", features: [{
+    type: "Feature", properties: {},
+    geometry: { type: "Polygon", coordinates: [hexRing(meta.hex_ids[sampleHexIndex])] } }] });
+  document.getElementById("originInput").value = meta.hex_ids[hexIndex];
+  document.getElementById("originMessage").textContent =
+    meta.hex_ids[hexIndex] === meta.sample_origin_hex[state.sampleOrigin] ? "" : "using nearest stored origin";
+  await refresh();
+}
+
+async function refresh() {
+  currentValues = await computeValues();
+  paintHexes();
+}
+
+/* ---------- controls ------------------------------------------------------ */
+
+function connectControls() {
+  document.getElementById("mode").addEventListener("change", async event => {
+    state.mode = event.target.value;
+    await refresh();
+  });
+  document.getElementById("scenario").addEventListener("change", async event => {
+    state.scenario = event.target.value;
+    await refresh();
+  });
+  document.getElementById("hour").addEventListener("input", async event => {
+    state.hour = Number(event.target.value);
+    document.getElementById("hourValue").textContent = hourText(state.hour);
+    await refresh();
+  });
+  document.getElementById("limit").addEventListener("input", async event => {
+    state.limit = Number(event.target.value);
+    document.getElementById("limitValue").textContent = state.limit + " min";
+    await refresh();
+  });
+  document.getElementById("originSet").addEventListener("click", async () => {
+    const input = document.getElementById("originInput");
+    const index = meta.hex_ids.indexOf(input.value.trim());
+    if (index < 0) { input.classList.add("bad"); document.getElementById("originMessage").textContent = "unknown hex"; return; }
+    input.classList.remove("bad");
+    await setOrigin(index);
+  });
+  document.getElementById("showStops").addEventListener("change", event => {
+    map.setLayoutProperty("stops", "visibility", event.target.checked ? "visible" : "none");
+  });
+  document.getElementById("showStreets").addEventListener("change", event => {
+    map.setLayoutProperty("streets", "visibility", event.target.checked ? "visible" : "none");
+  });
+}
+
+/* ---------- start --------------------------------------------------------- */
+
+function waitForMapReady() {
+  // The map's "load" event can fire while the page is in a background tab, before
+  // this code runs, so we also keep checking -- otherwise the page would wait forever.
+  return new Promise(resolve => {
+    const check = () => {
+      if (!map.isStyleLoaded()) return;
+      clearInterval(timer);
+      map.off("load", check);
+      resolve();
+    };
+    const timer = setInterval(check, 200);
+    map.on("load", check);
+    check();
+  });
+}
+
+(async function start() {
+  meta = await (await fetch("data/meta.json")).json();
+  buildHexFeatures();
+  await waitForMapReady();
+  addLayers();
+  connectControls();
+  document.getElementById("stats").textContent = "Click a hex to choose an origin.";
+  await refresh();
+}());
+</script>
+</body>
+</html>
