@@ -32,10 +32,12 @@
              border:1px solid var(--line); border-radius:7px; }
   .hexchip .hid { font-family:ui-monospace, Consolas, monospace; font-size:12px; font-weight:600;
                   min-width:150px; }
-  .legend { display:flex; gap:9px; align-items:center; margin-left:auto; flex-wrap:wrap; max-width:520px; }
-  .legend span { display:inline-flex; align-items:center; gap:5px; color:var(--muted); font-size:12px; }
+  .legend { position:absolute; z-index:2; right:8px; bottom:8px; display:flex; flex-direction:column;
+            gap:4px; padding:8px 10px; background:rgba(255,255,255,.94); border:1px solid var(--line);
+            border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,.08); max-width:240px; }
+  .legend span { display:inline-flex; align-items:center; gap:6px; color:var(--ink); font-size:12px; }
   .sw { width:13px; height:13px; border-radius:3px; display:inline-block; border:1px solid rgba(0,0,0,.15); }
-  #mapWrap { position:relative; height:calc(100% - 150px); }
+  #mapWrap { position:relative; height:calc(100% - 118px); }
   #map { position:absolute; inset:0; background:#eef0f2; }
   .maptag { position:absolute; z-index:2; top:8px; left:8px; padding:4px 10px; background:rgba(255,255,255,.92);
             border:1px solid var(--line); border-radius:6px; font-weight:700; box-shadow:0 1px 4px rgba(0,0,0,.08); }
@@ -79,6 +81,17 @@
   </div>
 
   <div class="ctl">
+    <label>Time of day</label>
+    <select id="hourMode">
+      <option value="single" selected>One departure hour</option>
+      <option value="day">Average 06:00-21:00</option>
+      <option value="peakAm">Average 07:00-10:00</option>
+      <option value="peakPm">Average 17:00-20:00</option>
+      <option value="all">Average all 24 hours</option>
+    </select>
+  </div>
+
+  <div class="ctl" id="hourControl">
     <label>Departure <span class="val" id="hourValue">09:00</span></label>
     <input type="range" id="hour" min="0" max="23" value="9">
   </div>
@@ -104,12 +117,11 @@
     <label><input type="checkbox" id="showStops"> Bus stops</label>
     <label><input type="checkbox" id="showStreets" checked> Street map</label>
   </div>
-
-  <div class="legend" id="legend"></div>
 </div>
 
 <div id="mapWrap">
   <div class="maptag" id="mapTag">-<small>-</small></div>
+  <div class="legend" id="legend"></div>
   <div class="stats" id="stats">Loading...</div>
   <div id="busy">loading origin...</div>
   <div id="map"></div>
@@ -129,8 +141,18 @@ const SEQUENTIAL = ["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"];
 const DIVERGING = ["#a50f15", "#ef8a62", "#f7f7f7", "#91cf60", "#006837"];
 const NO_DATA_COLOUR = "#c4c9d0";
 
+// Which departure hours each "time of day" choice covers.
+const HOUR_SETS = {
+  day: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
+  peakAm: [7, 8, 9, 10],
+  peakPm: [17, 18, 19, 20],
+  all: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+};
+const HOUR_SET_NAMES = { day: "06:00-21:00 average", peakAm: "07:00-10:00 average",
+                         peakPm: "17:00-20:00 average", all: "24-hour average" };
+
 const state = {
-  mode: "time", scenario: "revised", hour: 9, limit: 60,
+  mode: "time", scenario: "revised", hour: 9, hourMode: "single", limit: 60,
   origin: -1, sampleOrigin: -1, showStops: false, showStreets: true,
 };
 
@@ -144,9 +166,11 @@ let currentGroups = null;              // compare mode: which group each hex is 
 
 // Compare mode groups a hex by whether it is within the threshold in each network.
 const COMPARE_GROUPS = { BOTH: 0, NEW: 1, LOST: 2, NEITHER: 3 };
-const COMPARE_COLOURS = { NEW: "#238b45", LOST: "#d73027", NEITHER: NO_DATA_COLOUR };
+// Colours chosen to stay apart from each other: green for new, blues for already
+// reachable, red for lost, near-white for beyond the threshold.
+const COMPARE_COLOURS = { NEW: "#00a05a", LOST: "#e31a1c", NEITHER: "#ededf0" };
 // Reachable in both: shaded by how many minutes the revised trip saves.
-const SAVING_COLOURS = ["#c6dbef", "#9ecae1", "#6baed6", "#3182bd", "#08306b"];
+const SAVING_COLOURS = ["#b9d9ee", "#7fb6e0", "#3d84c6", "#1a53a0", "#0b2c6b"];
 const LARGEST_SHOWN_SAVING = 30;       // minutes; more than this uses the darkest shade
 
 /* ---------- loading files ------------------------------------------------- */
@@ -196,6 +220,28 @@ function minutesFromOrigin(scenario, hex, hour) {
   return band * meta.minutes_per_band;
 }
 
+function chosenHours() {
+  return state.hourMode === "single" ? [state.hour] : HOUR_SETS[state.hourMode];
+}
+
+function timeOfDayText() {
+  return state.hourMode === "single" ? "leaving " + hourText(state.hour) : HOUR_SET_NAMES[state.hourMode];
+}
+
+function averageMinutesFromOrigin(scenario, hex) {
+  // Mean travel time over the chosen hours, counting only the hours when the trip
+  // can be made; null when it can never be made in those hours.
+  const hours = chosenHours();
+  let sum = 0, counted = 0;
+  for (let index = 0; index < hours.length; index++) {
+    const minutes = minutesFromOrigin(scenario, hex, hours[index]);
+    if (minutes === null) continue;
+    sum += minutes;
+    counted++;
+  }
+  return counted ? sum / counted : null;
+}
+
 /* ---------- the number each hex is coloured by ---------------------------- */
 
 async function computeValues() {
@@ -209,8 +255,8 @@ async function computeValues() {
     currentGroups = new Uint8Array(count).fill(COMPARE_GROUPS.NEITHER);
     if (state.sampleOrigin < 0) return values;
     for (let hex = 0; hex < count; hex++) {
-      const baseline = minutesFromOrigin("baseline", hex, state.hour);
-      const revised = minutesFromOrigin("revised", hex, state.hour);
+      const baseline = averageMinutesFromOrigin("baseline", hex);
+      const revised = averageMinutesFromOrigin("revised", hex);
       const inBaseline = baseline !== null && baseline <= state.limit;
       const inRevised = revised !== null && revised <= state.limit;
       if (inBaseline && inRevised) {
@@ -229,8 +275,8 @@ async function computeValues() {
   if (state.mode === "time") {
     if (state.sampleOrigin < 0) return values;
     for (let hex = 0; hex < count; hex++) {
-      const baseline = minutesFromOrigin("baseline", hex, state.hour);
-      const revised = minutesFromOrigin("revised", hex, state.hour);
+      const baseline = averageMinutesFromOrigin("baseline", hex);
+      const revised = averageMinutesFromOrigin("revised", hex);
       if (state.scenario === "difference") {
         values[hex] = (baseline === null || revised === null) ? NaN : revised - baseline;
       } else {
@@ -244,9 +290,14 @@ async function computeValues() {
   const kind = state.mode === "jobs" ? "jobs" : "destinations";
   const baseline = await summaryArray(kind, "baseline", limit);
   const revised = await summaryArray(kind, "revised", limit);
-  const offset = state.hour * count;
+  const hours = chosenHours();
   for (let hex = 0; hex < count; hex++) {
-    const before = baseline[offset + hex], after = revised[offset + hex];
+    let beforeSum = 0, afterSum = 0;
+    for (let index = 0; index < hours.length; index++) {
+      beforeSum += baseline[hours[index] * count + hex];
+      afterSum += revised[hours[index] * count + hex];
+    }
+    const before = beforeSum / hours.length, after = afterSum / hours.length;
     values[hex] = state.scenario === "difference" ? after - before
                 : state.scenario === "baseline" ? before : after;
   }
@@ -398,9 +449,13 @@ function buildHexFeatures() {
 function hexCollection() { return { type: "FeatureCollection", features: hexFeatures }; }
 
 function addLayers() {
+  // The street map is only there for orientation, so it is faded to near grey and
+  // kept pale; the hex colours should be what the eye lands on.
   map.addSource("streets", { type: "raster", tileSize: 256,
     tiles: ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"], attribution: "(c) OpenStreetMap" });
-  map.addLayer({ id: "streets", type: "raster", source: "streets", paint: { "raster-opacity": 0.95 } });
+  map.addLayer({ id: "streets", type: "raster", source: "streets",
+    paint: { "raster-opacity": 0.45, "raster-saturation": -0.95, "raster-contrast": -0.25,
+             "raster-brightness-min": 0.35 } });
 
   map.addSource("hexes", { type: "geojson", data: hexCollection() });
   map.addLayer({ id: "hex-fill", type: "fill", source: "hexes",
@@ -437,8 +492,8 @@ function hexPopup(index) {
   let html = '<div class="pid">' + meta.hex_ids[index] + "</div>" +
              "<div>zone " + zone + " &middot; " + formatNumber(meta.jobs_per_hex[index], 0) + " jobs here</div>";
   if ((state.mode === "time" || state.mode === "compare") && state.sampleOrigin >= 0) {
-    const baseline = minutesFromOrigin("baseline", index, state.hour);
-    const revised = minutesFromOrigin("revised", index, state.hour);
+    const baseline = averageMinutesFromOrigin("baseline", index);
+    const revised = averageMinutesFromOrigin("revised", index);
     html += "<div>baseline <b>" + (baseline === null ? "not reachable" : baseline + " min") + "</b></div>" +
             "<div>revised <b>" + (revised === null ? "not reachable" : revised + " min") + "</b></div>";
     if (baseline !== null && revised !== null) {
@@ -454,7 +509,7 @@ function hexPopup(index) {
     }
   } else if (state.mode !== "joblayer") {
     html += "<div>" + (state.mode === "jobs" ? "jobs" : "places") + " within " + nearestTimeLimit() +
-            " min at " + hourText(state.hour) + ": <b>" + formatValue(currentValues[index]) + "</b></div>";
+            " min, " + timeOfDayText() + ": <b>" + formatValue(currentValues[index]) + "</b></div>";
   }
   return html;
 }
@@ -484,7 +539,7 @@ function updateTag() {
     "<small>" + (state.mode === "joblayer" ? "jobs layer"
                  : state.mode === "compare" ? "within " + state.limit + " min"
                  : scenarioNames[state.scenario]) +
-    (state.mode === "joblayer" ? "" : " &middot; leaving " + hourText(state.hour)) +
+    (state.mode === "joblayer" ? "" : " &middot; " + timeOfDayText()) +
     (state.mode === "jobs" || state.mode === "destinations" ? " &middot; within " + nearestTimeLimit() + " min" : "") +
     "</small>";
 }
@@ -507,7 +562,7 @@ async function updateStats(low, high) {
     const reachableBefore = jobs[COMPARE_GROUPS.BOTH] + jobs[COMPARE_GROUPS.LOST];
     const reachableAfter = jobs[COMPARE_GROUPS.BOTH] + jobs[COMPARE_GROUPS.NEW];
     stats.innerHTML =
-      "Within <b>" + state.limit + " min</b> leaving <b>" + hourText(state.hour) + "</b> from <b>" +
+      "Within <b>" + state.limit + " min</b>, " + timeOfDayText() + ", from <b>" +
       meta.sample_origin_hex[state.sampleOrigin] + "</b>: jobs <b>" + formatNumber(reachableBefore, 0) +
       "</b> &rarr; <b>" + formatNumber(reachableAfter, 0) + "</b> (" +
       (reachableAfter - reachableBefore >= 0 ? "+" : "") +
@@ -524,11 +579,11 @@ async function updateStats(low, high) {
     if (state.sampleOrigin < 0) { stats.innerHTML = "Click a hex to choose an origin."; return; }
     let reachable = 0, jobs = 0;
     for (let hex = 0; hex < meta.hexes; hex++) {
-      const minutes = minutesFromOrigin(state.scenario === "baseline" ? "baseline" : "revised", hex, state.hour);
+      const minutes = averageMinutesFromOrigin(state.scenario === "baseline" ? "baseline" : "revised", hex);
       if (minutes !== null && minutes <= state.limit) { reachable++; jobs += meta.jobs_per_hex[hex]; }
     }
     const originHex = meta.sample_origin_hex[state.sampleOrigin];
-    stats.innerHTML = "From <b>" + originHex + "</b> leaving <b>" + hourText(state.hour) + "</b>: " +
+    stats.innerHTML = "From <b>" + originHex + "</b>, " + timeOfDayText() + ": " +
       "<b>" + formatNumber(reachable, 0) + "</b> hexes and <b>" + formatNumber(jobs, 0) +
       "</b> jobs within <b>" + state.limit + " min</b> (" +
       (state.scenario === "baseline" ? "baseline" : "revised") + ")";
@@ -541,7 +596,7 @@ async function updateStats(low, high) {
   }
   let sum = 0;
   for (let hex = 0; hex < meta.hexes; hex++) if (isFinite(currentValues[hex])) sum += currentValues[hex];
-  stats.innerHTML = "Average per hex at " + hourText(state.hour) + ": <b>" +
+  stats.innerHTML = "Average per hex, " + timeOfDayText() + ": <b>" +
     formatValue(sum / meta.hexes) + "</b> &middot; highest <b>" + formatValue(high) + "</b>";
 }
 
@@ -577,6 +632,13 @@ function connectControls() {
   });
   document.getElementById("scenario").addEventListener("change", async event => {
     state.scenario = event.target.value;
+    await refresh();
+  });
+  document.getElementById("hourMode").addEventListener("change", async event => {
+    state.hourMode = event.target.value;
+    // The departure slider only means something when one hour is shown.
+    document.getElementById("hourControl").style.visibility =
+      state.hourMode === "single" ? "visible" : "hidden";
     await refresh();
   });
   document.getElementById("hour").addEventListener("input", async event => {
