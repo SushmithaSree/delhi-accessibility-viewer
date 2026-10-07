@@ -70,7 +70,7 @@
     <label>Map shows</label>
     <select id="mode">
       <option value="compare">Compare the two networks (pick an origin)</option>
-      <option value="jobs" selected>Jobs accessible from each hex</option>
+      <option value="jobs" selected>Jobs accessible (pick an origin)</option>
       <option value="time">Travel time from one origin</option>
       <option value="wait">Avg wait per origin</option>
       <option value="walk">Avg walking per origin</option>
@@ -176,7 +176,7 @@ const SAVING_COLOURS = ["#d73027", "#fc8d59", "#fee08b", "#a6d96a", "#1a9850"];
 // Trip parts the viewer can map per hex (averages over trips within the summary limit).
 const TRIP_PART_MODES = ["wait", "in_vehicle", "walk", "transfers"];
 // Maps drawn from one chosen origin; the rest show something for every hex.
-const ORIGIN_MODES = ["time", "compare"];
+const ORIGIN_MODES = ["time", "compare", "jobs"];
 const LARGEST_SHOWN_SAVING = 30;       // minutes; more than this uses the darkest shade
 
 /* ---------- loading files ------------------------------------------------- */
@@ -269,6 +269,22 @@ async function computeValues() {
     for (let hex = 0; hex < count; hex++) values[hex] = meta.jobs_per_hex[hex];
     return values;
   }
+  if (state.mode === "jobs") {
+    // Each destination counts its jobs, discounted by how long the trip takes:
+    // full value next door, nothing at the threshold, straight line in between.
+    if (state.sampleOrigin < 0) return values;
+    for (let hex = 0; hex < count; hex++) {
+      const jobs = meta.jobs_per_hex[hex];
+      if (jobs <= 0) continue;
+      const baseline = averageMinutesFromOrigin("baseline", hex);
+      const revised = averageMinutesFromOrigin("revised", hex);
+      const weigh = minutes => (minutes === null || minutes > state.limit)
+                               ? 0 : jobs * (1 - minutes / state.limit);
+      values[hex] = state.scenario === "difference" ? weigh(revised) - weigh(baseline)
+                  : weigh(state.scenario === "baseline" ? baseline : revised);
+    }
+    return values;
+  }
   if (state.mode === "compare") {
     currentGroups = new Uint8Array(count).fill(COMPARE_GROUPS.NEITHER);
     if (state.sampleOrigin < 0) return values;
@@ -326,21 +342,6 @@ async function computeValues() {
                   : state.scenario === "baseline" ? before : after;
     }
     return values;
-  }
-  const limit = nearestTimeLimit();
-  const kind = state.mode === "jobs" ? "jobs" : "destinations";
-  const baseline = await summaryArray(kind, "baseline", limit);
-  const revised = await summaryArray(kind, "revised", limit);
-  const hours = chosenHours();
-  for (let hex = 0; hex < count; hex++) {
-    let beforeSum = 0, afterSum = 0;
-    for (let index = 0; index < hours.length; index++) {
-      beforeSum += baseline[hours[index] * count + hex];
-      afterSum += revised[hours[index] * count + hex];
-    }
-    const before = beforeSum / hours.length, after = afterSum / hours.length;
-    values[hex] = state.scenario === "difference" ? after - before
-                : state.scenario === "baseline" ? before : after;
   }
   return values;
 }
@@ -565,6 +566,10 @@ function hexPopup(index) {
       const change = revised - baseline;
       html += "<div>change <b>" + (change > 0 ? "+" : "") + change + " min</b></div>";
     }
+    if (state.mode === "jobs") {
+      html += "<div>counts as <b>" + formatNumber(currentValues[index], 0) +
+              "</b> after the travel-time discount</div>";
+    }
     if (state.mode === "compare") {
       const group = currentGroups[index];
       const names = { 0: "reachable in both", 1: "newly within " + state.limit + " min",
@@ -576,9 +581,6 @@ function hexPopup(index) {
     const names = { wait: "waiting", in_vehicle: "in-vehicle", walk: "walking", transfers: "transfers" };
     html += "<div>average " + names[state.mode] + " on trips within " + meta.summary_limit + " min, " +
             timeOfDayText() + ": <b>" + formatValue(currentValues[index]) + "</b></div>";
-  } else if (state.mode !== "joblayer") {
-    html += "<div>" + (state.mode === "jobs" ? "jobs" : "places") + " within " + nearestTimeLimit() +
-            " min, " + timeOfDayText() + ": <b>" + formatValue(currentValues[index]) + "</b></div>";
   }
   return html;
 }
@@ -601,7 +603,7 @@ function paintHexes() {
 
 function updateTag() {
   const tag = document.getElementById("mapTag");
-  const titles = { compare: "What the extra buses change", jobs: "Jobs accessible from each hex",
+  const titles = { compare: "What the extra buses change", jobs: "Jobs accessible from the chosen origin",
                    time: "Travel time from the chosen origin", joblayer: "# jobs located here",
                    wait: "Average wait per origin", in_vehicle: "Average in-vehicle time per origin",
                    walk: "Average walking per origin", transfers: "Average transfers per origin" };
@@ -611,7 +613,7 @@ function updateTag() {
                  : state.mode === "compare" ? "within " + state.limit + " min"
                  : scenarioNames[state.scenario]) +
     (state.mode === "joblayer" ? "" : " &middot; " + timeOfDayText()) +
-    (state.mode === "jobs" || state.mode === "destinations" ? " &middot; within " + nearestTimeLimit() + " min" : "") +
+    (state.mode === "jobs" ? " &middot; jobs discounted to nothing at " + state.limit + " min" : "") +
     (TRIP_PART_MODES.includes(state.mode)
       ? " &middot; average over trips within " + meta.summary_limit + " min" : "") +
     "</small>";
@@ -660,6 +662,20 @@ async function updateStats(low, high) {
       "<b>" + formatNumber(reachable, 0) + "</b> hexes and <b>" + formatNumber(jobs, 0) +
       "</b> jobs within <b>" + state.limit + " min</b> (" +
       (state.scenario === "baseline" ? "baseline" : "revised") + ")";
+    return;
+  }
+  if (state.mode === "jobs") {
+    if (state.sampleOrigin < 0) { stats.innerHTML = "Click a hex to choose where to start."; return; }
+    let weighted = 0, plainJobs = 0, hexesWithin = 0;
+    for (let hex = 0; hex < meta.hexes; hex++) {
+      if (isFinite(currentValues[hex])) weighted += currentValues[hex];
+      const minutes = averageMinutesFromOrigin(state.scenario === "baseline" ? "baseline" : "revised", hex);
+      if (minutes !== null && minutes <= state.limit) { plainJobs += meta.jobs_per_hex[hex]; hexesWithin++; }
+    }
+    stats.innerHTML = "From <b>" + meta.sample_origin_hex[state.sampleOrigin] + "</b>, " + timeOfDayText() +
+      ": <b>" + formatNumber(plainJobs, 0) + "</b> jobs within <b>" + state.limit + " min</b> in " +
+      formatNumber(hexesWithin, 0) + " hexes &middot; weighted by travel time: <b>" +
+      formatNumber(weighted, 0) + "</b>";
     return;
   }
   if (state.mode === "joblayer") {
