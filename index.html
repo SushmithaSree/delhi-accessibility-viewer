@@ -175,6 +175,8 @@ const COMPARE_COLOURS = { NEW: "#00441b", LOST: "#6a51a3", NEITHER: "#bdbdc2" };
 const SAVING_COLOURS = ["#d73027", "#fc8d59", "#fee08b", "#a6d96a", "#1a9850"];
 // Trip parts the viewer can map per hex (averages over trips within the summary limit).
 const TRIP_PART_MODES = ["wait", "in_vehicle", "walk", "transfers"];
+// Maps drawn from one chosen origin; the rest show something for every hex.
+const ORIGIN_MODES = ["time", "compare"];
 const LARGEST_SHOWN_SAVING = 30;       // minutes; more than this uses the darkest shade
 
 /* ---------- loading files ------------------------------------------------- */
@@ -661,27 +663,48 @@ async function updateStats(low, high) {
     return;
   }
   if (state.mode === "joblayer") {
-    stats.innerHTML = "<b>" + formatNumber(meta.jobs_in_matrix_hexes, 0) + "</b> jobs in mapped hexes of <b>" +
+    const selectedJobs = selectedHexLine();
+    stats.innerHTML = (selectedJobs ? selectedJobs + " &middot; " : "") +
+      "<b>" + formatNumber(meta.jobs_in_matrix_hexes, 0) + "</b> jobs in mapped hexes of <b>" +
       formatNumber(meta.total_jobs_in_layer, 0) + "</b> in the jobs layer";
     return;
   }
   let sum = 0;
   for (let hex = 0; hex < meta.hexes; hex++) if (isFinite(currentValues[hex])) sum += currentValues[hex];
-  stats.innerHTML = "Average per hex, " + timeOfDayText() + ": <b>" +
-    formatValue(sum / meta.hexes) + "</b> &middot; highest <b>" + formatValue(high) + "</b>";
+  const selected = selectedHexLine();
+  stats.innerHTML = (selected ? selected + " &middot; " : "") +
+    "average per hex, " + timeOfDayText() + ": <b>" + formatValue(sum / meta.hexes) +
+    "</b> &middot; highest <b>" + formatValue(high) + "</b>";
 }
 
 /* ---------- choosing the origin ------------------------------------------- */
 
 async function setOrigin(hexIndex) {
+  // A click always marks the hex. In the two origin-based maps it also becomes the
+  // origin the map is drawn from; in the per-hex maps it just reports that hex.
   state.origin = hexIndex;
   state.sampleOrigin = meta.sample_origin_of_hex[hexIndex];
-  originTimes = await originArray(state.sampleOrigin);
-  const sampleHexIndex = meta.hex_ids.indexOf(meta.sample_origin_hex[state.sampleOrigin]);
+  const outlined = ORIGIN_MODES.includes(state.mode)
+    ? meta.hex_ids.indexOf(meta.sample_origin_hex[state.sampleOrigin]) : hexIndex;
   map.getSource("origin").setData({ type: "FeatureCollection", features: [{
     type: "Feature", properties: {},
-    geometry: { type: "Polygon", coordinates: [hexRing(meta.hex_ids[sampleHexIndex])] } }] });
+    geometry: { type: "Polygon", coordinates: [hexRing(meta.hex_ids[outlined])] } }] });
+  if (ORIGIN_MODES.includes(state.mode)) originTimes = await originArray(state.sampleOrigin);
   await refresh();
+}
+
+function selectedHexLine() {
+  // What the clicked hex says in the map the user is looking at.
+  if (state.origin < 0) return "";
+  const hexId = meta.hex_ids[state.origin];
+  const zone = meta.zone_labels[meta.zone_of_hex[state.origin]];
+  if (state.mode === "joblayer") {
+    return "Selected <b>" + hexId + "</b> (zone " + zone + "): <b>" +
+           formatNumber(meta.jobs_per_hex[state.origin], 0) + "</b> jobs here";
+  }
+  return "Selected <b>" + hexId + "</b> (zone " + zone + "): " +
+         (state.scenario === "difference" ? "change " : state.scenario + " ") +
+         "<b>" + formatValue(currentValues[state.origin]) + "</b>";
 }
 
 async function refresh() {
@@ -701,6 +724,10 @@ function connectLayersBox() {
 function connectControls() {
   document.getElementById("mode").addEventListener("change", async event => {
     state.mode = event.target.value;
+    if (ORIGIN_MODES.includes(state.mode) && state.origin >= 0 && !originTimes) {
+      await setOrigin(state.origin);
+      return;
+    }
     // Compare mode shows both networks at once, and the jobs layer has no network.
     document.getElementById("scenario").disabled = state.mode === "compare" || state.mode === "joblayer";
     await refresh();
